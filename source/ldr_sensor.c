@@ -17,6 +17,11 @@
 #include "fsl_gpio.h"
 #include "fsl_port.h"
 
+/* External function prototypes for buzzer control */
+extern void setBuzzer(int percent, int frequency);
+extern void startPWM(void);
+extern void stopPWM(void);
+
 /* Private variables */
 static volatile uint16_t last_adc_value = 0;
 
@@ -137,6 +142,25 @@ void ADC0_IRQHandler(void) {
         
         PRINTF("LDR ADC Value: %d, Voltage: %d.%03dV, Light Level: %d%%\r\n", 
                result, voltage_mv/1000, voltage_mv%1000, percentage);
+        
+        // Check if it's very dark (ADC reading < 10) and trigger buzzer
+        if(result < 10) {
+            PRINTF("Very dark detected! Buzzer beep!\r\n");
+            
+            // Trigger buzzer beep (800Hz, 60% duty cycle for alert)
+            setBuzzer(60, 800);
+            startPWM();
+            
+            // Brief delay to let the beep sound
+            // Use a simple loop instead of calling delay function
+            volatile uint32_t i;
+            for (i = 0; i < 300000; ++i) {
+                __asm("NOP");
+            }
+            
+            // Stop the buzzer
+            stopPWM();
+        }
     }
 }
 

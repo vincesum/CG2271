@@ -24,10 +24,13 @@
 /* Sensor definitions */
 #define SOUND_PIN      6    // PTC6 digital output from sound sensor
 
-// LED pin numbers
-#define RED_PIN		31	// PTE31
-#define GREEN_PIN	5	// PTD5
-#define BLUE_PIN	29	// PTE29
+// LED pin numbers (using your friend's configuration)
+#define RED_PIN		5	// PTD5
+#define GREEN_PIN	7	// PTD7
+#define BLUE_PIN	6	// PTD6
+
+// Buzzer pin numbers
+#define BUZZER_PIN 30   // PTE30 (Note: your friend had PTE31, but PTE30 is TPM0_CH3)
 
 typedef enum tl {
 	RED, GREEN, BLUE
@@ -36,6 +39,12 @@ typedef enum tl {
 /* Function prototypes */
 void initSoundSensor(void);
 void initGPIO(void);
+void setMCGIRClk(void);
+void setTPMClock(void);
+void initPWM(void);
+void startPWM(void);
+void stopPWM(void);
+void setBuzzer(int percent, int frequency);
 void ledOn(TLED led);
 void ledOff(TLED led);
 void PORTC_PORTD_IRQHandler(void);
@@ -46,25 +55,111 @@ void delay(uint32_t count);
  */
 
 void initGPIO() {
+    // LED setup (using your friend's configuration)
     // Set up the clock gating
     SIM->SCGC5 |= (SIM_SCGC5_PORTD_MASK | SIM_SCGC5_PORTE_MASK);
 
-    // Set up the pin PCR values
+    // Set up the pin PCR values for LEDs (all on PORTD)
+    PORTD->PCR[RED_PIN] &= ~PORT_PCR_MUX_MASK;
     PORTD->PCR[GREEN_PIN] &= ~PORT_PCR_MUX_MASK;
-    PORTD->PCR[GREEN_PIN] = PORT_PCR_MUX(1);
+    PORTD->PCR[BLUE_PIN] &= ~PORT_PCR_MUX_MASK;
+
+    PORTD->PCR[RED_PIN] = PORT_PCR_MUX(1);    // Set to ALT1
+    PORTD->PCR[GREEN_PIN] = PORT_PCR_MUX(1);  // Set to ALT1
+    PORTD->PCR[BLUE_PIN] = PORT_PCR_MUX(1);   // Set to ALT1
+
+    // Set as outputs
+    GPIOD->PDDR |= (1 << RED_PIN);
     GPIOD->PDDR |= (1 << GREEN_PIN);
+    GPIOD->PDDR |= (1 << BLUE_PIN);
 
-    PORTE->PCR[RED_PIN] &= ~PORT_PCR_MUX_MASK;
-    PORTE->PCR[BLUE_PIN] &= ~PORT_PCR_MUX_MASK;
+    // All LEDs OFF at startup
+    ledOff(RED);
+    ledOff(GREEN);
+    ledOff(BLUE);
+}
 
-    PORTE->PCR[RED_PIN] = PORT_PCR_MUX(1);
-    PORTE->PCR[BLUE_PIN] = PORT_PCR_MUX(1);
-    GPIOE->PDDR |= (1 << BLUE_PIN);
-    GPIOE->PDDR |= (1 << RED_PIN);
+// Configure the MCG Internal Reference Clock
+void setMCGIRClk() {
+    MCG->C1 &= ~MCG_C1_CLKS_MASK;
+    // Choose MCG clock source of 01 for LIRC
+    // and set IRCLKEN to 1 to enable LIRC
+    MCG->C1 |= ((MCG_C1_CLKS(0b01) | MCG_C1_IRCLKEN_MASK));
 
-    // All LEDs OFF at startup (active-low -> drive high)
-    GPIOE->PSOR = (1 << RED_PIN) | (1 << BLUE_PIN);
-    GPIOD->PSOR = (1 << GREEN_PIN);
+    // Set IRCS to 1 to choose 8 MHz clock
+    MCG->C2 |= MCG_C2_IRCS_MASK;
+
+    // Choose FCRDIV of 0 for divisor of 1
+    MCG->SC &= ~MCG_SC_FCRDIV_MASK;
+    MCG->SC |= MCG_SC_FCRDIV(0b0);
+
+    // Choose LIRC_DIV2 of 0 for divisor of 1
+    MCG->MC &= ~MCG_MC_LIRC_DIV2_MASK;
+    MCG->MC |= MCG_MC_LIRC_DIV2(0b0);
+}
+
+void setTPMClock(){
+    // Set MCGIRCLK
+    setMCGIRClk();
+
+    // Choose MCGIRCLK (8 MHz)
+    SIM->SOPT2 &= ~SIM_SOPT2_TPMSRC_MASK;
+    SIM->SOPT2 |= SIM_SOPT2_TPMSRC(0b11);
+}
+
+// Buzzer: PTE30 TPM0 CH 3 ALT3
+void initPWM() {
+    // Turn on clock gating to TPM0
+    SIM->SCGC6 |= SIM_SCGC6_TPM0_MASK;
+
+    // Turn on clock gating to Port E (already done in initGPIO, but keeping for completeness)
+    SIM->SCGC5 |= SIM_SCGC5_PORTE_MASK;
+
+    // Set the pin multiplexor for buzzer
+    PORTE->PCR[BUZZER_PIN] &= ~PORT_PCR_MUX_MASK;
+    // PWM (ALT3 for TPM0_CH3)
+    PORTE->PCR[BUZZER_PIN] |= PORT_PCR_MUX(0b11);
+
+    // Set pin to output
+    GPIOE->PDDR |= (1 << BUZZER_PIN);
+
+    // Set up TPM0
+    // Turn off TPM0 and clear the prescalar field
+    TPM0->SC &= ~(TPM_SC_CMOD_MASK | TPM_SC_PS_MASK);
+
+    // Set prescalar of 8 (0b011)
+    TPM0->SC |= TPM_SC_PS(0b011);
+
+    // Select centre-aligned PWM mode
+    TPM0->SC |= TPM_SC_CPWMS_MASK;
+
+    // Initialize count to 0
+    TPM0->CNT = 0;
+
+    // Default MOD value
+    TPM0->MOD = 125;
+
+    // Configure channel 3
+    // MS=10, ELS=10 for PWM signal
+    TPM0->CONTROLS[3].CnSC &= ~(TPM_CnSC_MSA_MASK | TPM_CnSC_ELSA_MASK);
+    TPM0->CONTROLS[3].CnSC |= (TPM_CnSC_MSB(1) | TPM_CnSC_ELSB(1));
+}
+
+void startPWM() {
+    TPM0->SC |= TPM_SC_CMOD(0b01);
+}
+
+void stopPWM() {
+    TPM0->SC &= ~TPM_SC_CMOD_MASK;
+}
+
+void setBuzzer(int percent, int frequency) {
+    int clock_freq = CLOCK_GetBusClkFreq();
+    int mod = (int) ((clock_freq/(frequency*2*8)));
+    TPM0->MOD = mod;
+
+    int value = (int)((percent / 100.0) * (double) TPM0->MOD);
+    TPM0->CONTROLS[3].CnV = value; // set duty cycle on channel 3
 }
 
 void initSoundSensor(void) {
@@ -93,13 +188,13 @@ void initSoundSensor(void) {
 void ledOn(TLED led) {
     switch(led) {
     case RED:
-        GPIOE->PCOR |= (1 << RED_PIN);
+        GPIOD->PSOR |= (1 << RED_PIN);  // All LEDs now on PORTD
         break;
     case GREEN:
-        GPIOD->PCOR |= (1 << GREEN_PIN);
+        GPIOD->PSOR |= (1 << GREEN_PIN);
         break;
     case BLUE:
-        GPIOE->PCOR |= (1 << BLUE_PIN);
+        GPIOD->PSOR |= (1 << BLUE_PIN);
         break;
     }
 }
@@ -107,13 +202,13 @@ void ledOn(TLED led) {
 void ledOff(TLED led) {
     switch(led) {
     case RED:
-        GPIOE->PSOR |= (1 << RED_PIN);
+        GPIOD->PCOR |= (1 << RED_PIN);  // All LEDs now on PORTD
         break;
     case GREEN:
-        GPIOD->PSOR |= (1 << GREEN_PIN);
+        GPIOD->PCOR |= (1 << GREEN_PIN);
         break;
     case BLUE:
-        GPIOE->PSOR |= (1 << BLUE_PIN);
+        GPIOD->PCOR |= (1 << BLUE_PIN);
         break;
     }
 }
@@ -121,8 +216,13 @@ void ledOff(TLED led) {
 void PORTC_PORTD_IRQHandler(void) {
     if (PORTC->ISFR & (1 << SOUND_PIN)) {
         PORTC->ISFR = (1 << SOUND_PIN);  // clear flag
-        GPIOE->PTOR = (1 << BLUE_PIN);   // toggle blue LED
-        PRINTF("Sound detected!\r\n");
+        
+        // Flash red LED (turn on, brief delay, turn off)
+        ledOn(RED);
+        delay(200000);  // Flash duration
+        ledOff(RED);
+        
+        PRINTF("Sound detected! Red LED flash!\r\n");
     }
 }
 
@@ -147,12 +247,17 @@ int main(void) {
     PRINTF("=== CG2271 Multi-Sensor System ===\r\n");
     PRINTF("LDR Sensor: PTE20 (ADC0_SE0)\r\n");
     PRINTF("Sound Sensor: PTC6 (Digital)\r\n");
+    PRINTF("Buzzer: PTE30 (TPM0_CH3)\r\n");
+    PRINTF("LEDs: PTD5(Red), PTD7(Green), PTD6(Blue)\r\n");
     
     /* Initialize GPIO and LEDs */
     initGPIO();
-    ledOff(RED);
-    ledOff(GREEN);
-    ledOff(BLUE);
+    
+    /* Initialize PWM for buzzer */
+    PRINTF("Initializing actuators...\r\n");
+    setTPMClock();
+    initPWM();
+    PRINTF("Buzzer initialized\r\n");
     
     /* Initialize all sensor modules */
     PRINTF("Initializing sensors...\r\n");
@@ -164,7 +269,20 @@ int main(void) {
     initSoundSensor();
     PRINTF("Sound sensor initialized\r\n");
     
-    PRINTF("All sensors ready! Make some noise to test sound detection.\r\n");
+    // Test LEDs briefly
+    PRINTF("Testing LEDs...\r\n");
+    ledOn(RED);
+    delay(500000);
+    ledOff(RED);
+    ledOn(GREEN);
+    delay(500000);
+    ledOff(GREEN);
+    ledOn(BLUE);
+    delay(500000);
+    ledOff(BLUE);
+    
+    PRINTF("All sensors and actuators ready!\r\n");
+    PRINTF("Make some noise to test sound detection with buzzer beep!\r\n");
 
     /* Enter an infinite loop with controlled readings */
     while(1) {
@@ -172,7 +290,7 @@ int main(void) {
         LDR_TriggerReading();
         
         // Wait for a reasonable interval between readings (about 1 second)
-        delay(8000000); // Adjust delay as needed for your desired reading frequency
+        delay(1000000); // Adjust delay as needed for your desired reading frequency
     }
     return 0 ;
 }
